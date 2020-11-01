@@ -12,6 +12,9 @@ jobs:
     # paxoskv/impl.go:12:2: no required module provides package golang.org/x/net/context; try 'go mod tidy' to add it
     allow_failures:
         - go: tip
-
+install:
+    - ./install-protoc.sh
+    - go get github.com/golang/protobuf/protoc-gen-go
 script:
+    - make gen
     - go test ./...
