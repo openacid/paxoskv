@@ -27,7 +27,7 @@ func Example_setAndGetByKeyVer() {
 			Bal: &BallotNum{N: 0, ProposerId: 2},
 		}
 		v := prop.RunPaxos(acceptorIds, &Value{Vi64: 5})
-		fmt.Printf("written: %v;\n", v)
+		fmt.Printf("written: %v;\n", v.Vi64)
 	}
 
 	// get foo₀
@@ -40,7 +40,7 @@ func Example_setAndGetByKeyVer() {
 			Bal: &BallotNum{N: 0, ProposerId: 2},
 		}
 		v := prop.RunPaxos(acceptorIds, nil)
-		fmt.Printf("read:    %v;\n", v)
+		fmt.Printf("read:    %v;\n", v.Vi64)
 	}
 
 	// set foo₁ = 6
@@ -53,7 +53,7 @@ func Example_setAndGetByKeyVer() {
 			Bal: &BallotNum{N: 0, ProposerId: 2},
 		}
 		v := prop.RunPaxos(acceptorIds, &Value{Vi64: 6})
-		fmt.Printf("written: %v;\n", v)
+		fmt.Printf("written: %v;\n", v.Vi64)
 	}
 
 	// get foo₁
@@ -66,13 +66,13 @@ func Example_setAndGetByKeyVer() {
 			Bal: &BallotNum{N: 0, ProposerId: 2},
 		}
 		v := prop.RunPaxos(acceptorIds, nil)
-		fmt.Printf("read:    %v;\n", v)
+		fmt.Printf("read:    %v;\n", v.Vi64)
 	}
 
 	// Output:
-	// written: Vi64:5 ;
-	// read:    Vi64:5 ;
-	// written: Vi64:6 ;
-	// read:    Vi64:6 ;
+	// written: 5;
+	// read:    5;
+	// written: 6;
+	// read:    6;
 
 }
