@@ -41,7 +41,7 @@ func TestCase1SingleProposer(t *testing.T) {
 
 	// Phase 1 will be done without seeing other ballot, nor other voted value.
 	latestVal, higherBal, err := px.Phase1([]int64{0, 1}, quorum)
-	ta.Nil(err, "success")
+	ta.Nil(err, "constituted a quorum")
 	ta.Nil(higherBal, "no other proposer is seen")
 	ta.Nil(latestVal, "no voted value")
 
@@ -50,7 +50,7 @@ func TestCase1SingleProposer(t *testing.T) {
 
 	// Phase 2
 	higherBal, err = px.Phase2([]int64{0, 1}, quorum)
-	ta.Nil(err, "success")
+	ta.Nil(err, "constituted a quorum")
 	ta.Nil(higherBal, "no other proposer is seen")
 }
 
@@ -127,7 +127,7 @@ func TestCase2DoubleProposer(t *testing.T) {
 	px.Val = nil
 	px.Bal = &BallotNum{N: 3, ProposerId: pidx}
 	latestVal, higherBal, err = px.Phase1([]int64{0, 1}, quorum)
-	ta.Nil(err, "succeess")
+	ta.Nil(err, "constituted a quorum")
 	ta.Nil(higherBal, "X should not see other bal")
 	ta.True(proto.Equal(latestVal, py.Val),
 		"X should see the value Acceptor voted for Y")
