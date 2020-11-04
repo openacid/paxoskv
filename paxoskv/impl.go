@@ -253,8 +253,12 @@ func (s *KVServer) Accept(c context.Context, r *Proposer) (*Acceptor, error) {
 
 	v := s.getLockedVersion(r.Id)
 	defer v.mu.Unlock()
+
+	// a := &X{}
+	// `b := &*a` does not deref the reference, b and a are the same pointer.
+	d := *v.acceptor.LastBal
 	reply := Acceptor{
-		LastBal: &*v.acceptor.LastBal,
+		LastBal: &d,
 	}
 
 	if r.Bal.GE(v.acceptor.LastBal) {
