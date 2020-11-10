@@ -1,6 +1,7 @@
 # paxoskv: a Naive and Basic paxos kv storage
 
-[![Build Status](https://travis-ci.com/openacid/paxoskv.svg?branch=master)](https://travis-ci.com/openacid/paxoskv)
+![naive](https://github.com/openacid/paxoskv/workflows/test/badge.svg?branch=naive)
+[![Build Status](https://travis-ci.com/openacid/paxoskv.svg?branch=naive)](https://travis-ci.com/openacid/paxoskv)
 
 这个repo 目前仅是用于学习的实例代码.
 
