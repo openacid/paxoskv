@@ -60,6 +60,21 @@ voted value == accepted value // by an acceptor
 
     - `example_set_get_test.go`: 使用paxos提供的接口实现指定key和ver的写入和读取.
 
+
+
+Change:
+multi paxos
+
+
+Log and snapshot
+
+Key-ver to log
+
+global LastBal now is a server attr
+
+Proposer 不再维护paxosId
+
+
 # Question
 
 如果有任何问题, 欢迎提[issue] :DDD.

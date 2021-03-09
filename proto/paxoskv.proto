@@ -2,69 +2,101 @@ syntax = "proto3";
 
 package paxoskv;
 
-// PaxosKV defines the paxos RPC.
-//
-// A Proposer sends all its fields in a Prepare request, with `Val` being left a nil.
-// A Proposer sends all its fields in an Accept request, with `Val` being filled with
-// the value it chose.
-//
-// An Acceptor responds all its fields in a Prepare reply.
-// An Acceptor responds `LastBal` fields in a Accept reply.
-//
-// Thus we just use the struct of a Proposer as request struct.
-// And the struct of an Acceptor as reply struct.
+// PaxosKV defines the paxos RPC and KV API.
 service PaxosKV {
-    rpc Prepare (Proposer) returns (Acceptor) {}
-    rpc Accept (Proposer) returns (Acceptor) {}
+
+    // paxos API: used internally
+
+    rpc Prepare (PrepareReq) returns (PrepareReply) {}
+    rpc Accept (AcceptReq) returns (AcceptReply) {}
+    rpc Commit (CommitReq) returns (CommitReply) {}
+
+    // KV API
+
+    rpc Set (Cmd) returns (Cmd) {}
+    rpc Get (Cmd) returns (Cmd) {}
+}
+
+// multi-paxos prepare request.
+// It prepares for all paxos instance with log index >= LSN
+message PrepareReq {
+    // from what paxos instance it runs on
+    int64 FromLSN = 1;
+
+    // Bal is the ballot number of a Proposer
+    BallotNum Bal = 2;
+}
+
+// PrepareReply is the reply for multi-paxos prepare.
+// It returns a single LastBal since in a multi-paxos, all paxos instances
+// share the same LastBal and acceptor states.
+message PrepareReply {
+    // the last ballot number the instance knows of.
+    BallotNum LastBal = 1;
+
+    repeated Acceptor Acceptors = 2;
+}
+
+message AcceptReq {
+    // Bal is the ballot number of a Proposer
+    BallotNum Bal = 1;
+
+    // Multiple Cmd to accept
+    // The key is LSN.
+    map<int64, Cmd> Cmds = 2;
+}
+
+message AcceptReply {
+    BallotNum LastBal = 1;
+}
+
+message CommitReq {
+    map<int64, Cmd> Cmds = 1;
+}
+
+message CommitReply {
 }
 
 // BallotNum is the ballot number in paxos. It consists of a monotonically
 // incremental number and a universally unique ProposerId.
 message BallotNum {
     int64 N = 1;
-    int64 ProposerId = 2;
+    int64 Id = 2;
 }
 
-// Value is the value part of a key-value record.
-// In this demo it is just a int64
-message Value {
-    int64 Vi64 = 1;
+// Cmd is the value in this paxos impl, which is a command to set a key-value
+// record.
+// In this demo it is just string key and a int64 value.
+message Cmd {
+    // LSN: log-sequence-number
+    // LSN is used to identify a paxos instance.
+    int64  LSN = 1;
+
+    // Author and LSN together identifies a Cmd,
+    // since the BallotNum of an established leader is globally unique thus it
+    // identifies a leader.
+    //
+    // Different proposers may propose different Cmd for a same log entry.
+    // Paxos will finally choose one of them.
+    //
+    // Two proposers may propose a Cmd with the same Key and Vi64, in which case
+    // these two must be distinguishable, otherwise a Write operation may be
+    // lost.
+    BallotNum Author = 2;
+
+    string Key = 3;
+
+    int64  Vi64 = 4;
 }
 
-// PaxosInstanceId specifies what paxos instance it runs on.
-// A paxos instance is used to determine a specific version of a record.
-// E.g.: for a key-value record foo₀=0, to set foo=2, a paxos instance is
-// created to choose the value for key "foo", ver "1", i.e., foo₁
-message PaxosInstanceId {
-    // the key of a record to operate on.
-    string Key = 1;
-
-    // the version of the record to modify.
-    int64  Ver = 2;
-}
-
-// Acceptor is the state of an Acceptor and also serves as the reply of the
-// Prepare/Accept.
+// Acceptor is the state of an Acceptor and is the log entry in a multi
+// paxos logs
 message Acceptor {
-    // the last ballot number the instance knows of.
-    BallotNum LastBal = 1;
-
-    // the voted value by this Acceptor
-    Value Val = 2;
+    // the value voted by this Acceptor
+    Cmd Val = 3;
 
     // at which ballot number the Acceptor voted it.
-    BallotNum VBal = 3;
-}
+    BallotNum VBal = 4;
 
-// Proposer is the state of a Proposer and also serves as the request of
-// Prepare/Accept.
-message Proposer {
-    // what paxos instance it runs on
-    PaxosInstanceId Id = 1;
-
-    // Bal is the ballot number of a Proposer
-    BallotNum Bal = 2;
-
-    // Val is the value a Proposer has chosen.
-    Value Val = 3;
+    bool Committed = 5;
 }
