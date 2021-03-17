@@ -11,12 +11,12 @@ import (
 
 func Example_setAndGet_KVAPI() {
 
-	acceptorIds := []int64{0, 1, 2}
+	serverIds := []int64{0, 1, 2}
 
-	servers := ServeAcceptors(acceptorIds)
+	servers := serveKVServers(serverIds)
 	defer func() {
 		for _, s := range servers {
-			s.srv.Stop()
+			s.grpcSrv.Stop()
 		}
 	}()
 
@@ -57,7 +57,7 @@ func Example_setAndGet_KVAPI() {
 				fmt.Println("Set:", req.Key, req.Vi64, "Get:", reply.Key, reply.Vi64)
 
 			}
-		}(acceptorIds[i%len(acceptorIds)])
+		}(serverIds[i%len(serverIds)])
 	}
 
 	nreq := 10

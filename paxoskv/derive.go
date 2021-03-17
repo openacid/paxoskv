@@ -1,113 +1,61 @@
 package paxoskv
 
 import (
-	"fmt"
-	"strings"
-
-	"google.golang.org/protobuf/proto"
+	"github.com/gogo/protobuf/proto"
 )
 
 func (b *BallotNum) Clone() *BallotNum { return proto.Clone(b).(*BallotNum) }
-func (b *Acceptor) Clone() *Acceptor   { return proto.Clone(b).(*Acceptor) }
+func (b *Ins) Clone() *Ins             { return proto.Clone(b).(*Ins) }
 func (b *Cmd) Clone() *Cmd             { return proto.Clone(b).(*Cmd) }
 
-type strer interface {
-	str() string
+func (b *Cmd) isNoop() bool {
+	return b.Key == "NOOP"
 }
 
-func (a *BallotNum) Cmp(b *BallotNum) int {
-	if a.N < b.N {
-		return -1
+func NewBal(n, id int64) *BallotNum {
+	return &BallotNum{
+		N:  n,
+		Id: id,
 	}
-	if a.N > b.N {
-		return 1
+}
+func NewInsId(column, lsn, n int64) *InsId {
+	return &InsId{
+		Column:     column,
+		LSN:        lsn,
+		ProposerId: n,
 	}
-	if a.Id < b.Id {
-		return -1
-	}
-	if a.Id > b.Id {
-		return 1
-	}
-	return 0
 }
 
-func (c *BallotNum) str() string {
-	if c == nil {
-		return "nil"
+func NewCmd(expr string, lsn int64) *Cmd {
+	c := &Cmd{
+		Key:  expr,
+		Vi64: lsn,
 	}
 
-	return fmt.Sprintf("%d,%d", c.N, c.Id)
-
+	return c
 }
-func (c *Cmd) str() string {
-	if c == nil {
-		return "nil"
+
+func (a *BallotNum) Less(b *BallotNum) bool {
+	// Vbal == nil is a fast-accepted state
+	// a == b == nil return false: not comparable
+	if b == nil {
+		return false
 	}
-	return fmt.Sprintf("<lsn:%d auth:%s %s=%d>", c.LSN, c.Author.str(), c.Key, c.Vi64)
-}
 
-func (a *Acceptor) str() string {
 	if a == nil {
-		return "nil"
+		return true
 	}
 
-	v := a.Val.str()
-	vb := a.VBal.str()
-	c := fmt.Sprintf("%v", a.Committed)
+	// a!= nil && b != nil
 
-	return fmt.Sprintf("<v:%s vbal:%s c:%s>", v, vb, c)
+	if a.N != b.N {
+		return a.N < b.N
+	}
+
+	return a.Id < b.Id
 }
 
-func (a *PrepareReq) str() string {
-	if a == nil {
-		return "nil"
-	}
-	return fmt.Sprintf("<from:%d Bal:%s>", a.FromLSN, a.Bal.str())
-}
-
-func (a *PrepareReply) str() string {
-	if a == nil {
-		return "nil"
-	}
-	var as []string
-	for _, acc:= range a.Acceptors {
-		as = append(as,acc.str())
-	}
-	return fmt.Sprintf("<lastbal:%s log:%s>", a.LastBal.str(), strings.Join(as, ","))
-}
-
-func (a *AcceptReq) str() string {
-	if a == nil {
-		return "nil"
-	}
-	var as []string
-	for _, cmd:= range a.Cmds {
-		as = append(as, cmd.str())
-	}
-	return fmt.Sprintf("<Bal:%s cmds:%s>", a.Bal.str(), strings.Join(as, ", "))
-}
-
-func (a *AcceptReply) str() string {
-	if a == nil {
-		return "nil"
-	}
-	return fmt.Sprintf("<lastbal:%s>", a.LastBal.str())
-}
-
-func (a *CommitReq) str() string {
-	if a == nil {
-		return "nil"
-	}
-	var as []string
-	for _, cmd:= range a.Cmds {
-		as = append(as, cmd.str())
-	}
-	return fmt.Sprintf("<cmds:%s>", strings.Join(as,", "))
-}
-
-func (a *CommitReply) str() string {
-	if a == nil {
-		return "nil"
-	}
-	return "<>"
+func (a *BallotNum) LessEqual(b *BallotNum) bool {
+	// two nil are incomparable
+	return a.Less(b) || (a != nil && a.Equal(b))
 }
