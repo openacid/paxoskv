@@ -3,6 +3,295 @@
 ![naive](https://github.com/openacid/paxoskv/workflows/test/badge.svg?branch=naive)
 [![Build Status](https://travis-ci.com/openacid/paxoskv.svg?branch=naive)](https://travis-ci.com/openacid/paxoskv)
 
+
+- Prepare: soft update knows, write instance with VBal=0 and Bal > 0
+- Accept: override knows
+
+compare with `Vbal, Bal, `
+
+instance operation:
+
+prepare(inst, bal)
+
+### Propose
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant R0
+    participant R1
+    participant R2
+
+    Client->>+R0: set V
+
+        Note right of R0: Prepare+Accept V vbal=0, pbal=1
+        
+        R0->>+R1: Prepare+Accept V vbal=1
+        Note right of R1: Accept: V vbal=1
+        
+        R1->>-R0: V pal=1 
+        
+        Note right of R0: Accept+Commit: V vbal=1
+    
+    R0->>-Client: OK 
+    
+    R0->>R1: Commit V vbal=1
+    R0->>R2: Commit V vbal=1
+    
+```
+
+### Repair
+
+Recovery send Prepare without value and do not accept.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant R0
+    participant R1
+    participant R2
+
+    Client->>+R0: set V
+
+        Note right of R0: Prepare+Accept V vbal=0, pbal=1
+        
+        R0->>+R1: Prepare+Accept V vbal=1, pbal=1
+        Note right of R1: Accept: V vbal=1, pbal=1
+        
+        R1->>-R0: V pal=1, last_pbal=0
+        
+        Note right of R0: Accept+Commit: V vbal=1
+    
+    R0->>-Client: OK 
+    
+    R2->>+R1: Prepare nil pbal=2
+        Note right of R1: V vbal=1, pbal=2
+    
+    R1->>-R2: V vbal=1, last_pbal=1
+    
+    Note right of R2: choose V vbal=1, pbal=1
+    
+    R2->>+R1: Accept V bal=2
+        Note right of R1: V vbal=2, pbal=2
+    
+    R1->>-R2: OK
+    
+    R2->>R1: Commit V vbal=2
+    R2->>R0: Commit V vbal=2
+```
+
+### Repair after re-send
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant R0
+    participant R1
+    participant R2
+
+    Client->>+R0: set V
+
+        Note over R0: Prepare+Accept: V_0 vbal=0
+        
+        R0->>+R1: Prepare+Accept: V_0 bal=1
+        Note over R1: Accept: V_1 vbal=1 last_bal=1
+        
+        R1--x-R0: Lost
+        
+        %% retry 
+        
+        Note over R0: bal=2
+        
+        R0->>+R2: Prepare+Accept V_0 bal=2
+        Note over R2: Accept: V_2 vbal=2 last_bal=2
+        
+        R2->>-R0: V_2 vbal=2 
+        
+        Note over R0: Accept+Commit: V_2 vbal=2
+    
+    R0->>-Client: OK 
+    
+    R2->>+R2: Prepare: nil bal=3
+    R2->>+R1: Prepare: nil bal=3
+    R1->>-R2: V vbal=1, pbal=1
+    
+    Note over R2: seen V_1 vbal=1 and V_2 vbal=2
+    Note over R2: choose latest: V_2 vbal=2
+    
+    R2->>+R1: Accept: V_2 vbal=2
+    Note over R1: Accept: V_2 vbal=2
+    
+    R1->>-R2: OK
+    
+    R2->>R1: Commit V_2
+    R2->>R0: Commit V_2
+```
+
+## Instance status
+
+- on leader: accepted vbal=0
+- on leader: committed
+- other: nil
+- other: accepted vbal > 0
+- other: committed
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant R0
+    participant R1
+    participant R2
+
+    Client->>+R0: set V
+
+        Note over R0: Prepare+Accept: V_0 vbal=0
+        
+        R0->>+R1: Prepare+Accept: V_0 bal=1
+            Note over R1: Accept: V_1 vbal=1 last_bal=1
+        R1--x-R0: Lost
+        
+        %% retry 
+        
+        Note over R0: bal=2
+        
+        R0->>+R2: Prepare+Accept V_0 bal=2
+            Note over R2: Accept: V_2 vbal=2 last_bal=2
+        R2--x-R0: Lost 
+        
+        Note over R0: bal=3
+        
+        %% Note over R0: Accept+Commit: V_2 vbal=2
+    
+    R0->>-Client: OK 
+    
+    R2->>+R2: Prepare: nil bal=3
+    R2->>+R1: Prepare: nil bal=3
+    R1->>-R2: V vbal=1, pbal=1
+    
+    Note over R2: seen V_1 vbal=1 and V_2 vbal=2
+    Note over R2: choose latest: V_2 vbal=2
+    
+    R2->>+R1: Accept: V_2 vbal=2
+    Note over R1: Accept: V_2 vbal=2
+    
+    R1->>-R2: OK
+    
+    R2->>R1: Commit V_2
+    R2->>R0: Commit V_2
+```
+
+
+# membership change
+
+- start x as a learner, i.e., just collect commit instances and apply them, do not propose new instance or vote.
+- propose a change cmd, e.g. (`abc->xbc`), commit and apply it. Nothing happens before applying it.
+- When applied, a stops accept new proposal, but continue commit present instances. A client receives error message then retry on x
+- When applied, a,b,c sends all instances to x. when x contact a quorum of abc, it starts to work.
+
+todo tla+
+
+
+# apply with SCC
+
+A straight forward algo to determine the apply order in a DAG is to find SCC recursively:
+E.g., ABC is an SCC and XY is another.
+This algo apply XY then ABC.
+In every SCC, determine the order by some attribute such as ord:
+
+```
+A -> B -> X -> Y
+^    |    ^    |
+|    v     `---'
+'--- C
+
+```
+
+If x is proposed after y is committed, then x sees y and y does not seen x,
+which implies y.Seen is a sub set of x.Seen.
+
+# apply with partial SCC
+
+```
+
+x      y      z
+a      b      c
+----------------
+C0     C1     C2    // 3 log column on one server
+
+```
+
+# apply without SCC
+
+```
+
+x      y      z
+a      b      c
+----------------
+C0     C1     C2    // 3 log column on one server
+```
+
+If instanes are in an SCC, apply them in any deterministic order is correct.
+If x is not in SCC, x depends on all instances in SCC or none.
+
+if x is proposed after y is committed: 
+=> |x.deps| >= |y.deps| 
+
+.: apply instances in the order of number of deps guarantees linearizability.
+
+
+## Lemma-cycle
+
+if x depends on y and x.ord < y.ord:
+then there is a cycle x->y->..x
+
+x.ord < y.ord
+=> x.vc <= y.vc
+=> x.seen[i] == y.seen[i] for any i => y depends on x
+   or there exists an i so that x.seen[i] < y.seen[i] => y.seen[i] depends on x
+
+
+## proof
+
+if x.ord > y.ord, no matter whether x and y is in a cycle or not, y will be applied first.
+
+if x.ord < y.ord: there is a cycle x->y->..->x by Lemma-cycle.
+    if x is the first to apply in a SCC. it is ok.
+    if another instance z is the first to apply:
+        if y depends on z, z will be found.
+        otherwise, there is a cycle z->y->..->z
+        The problem is reduced to: by going through min-ord path, the first inst to run can be find from y.
+        Then repeat the alog will find z.
+
+## differences
+
+SCC removes vertexes that can not be applied first, then consider relations between the lowest vertexes.
+It actually gets rid of some of the relation.
+
+VC 
+
+Both of them are correct: x proposed after y is committed always execute after y.
+
+E.g.:
+
+SCC chooses 36 first
+VC choose 54 first
+
+Because by considering only the lowest, the graph is:
+`54 -> 36`
+
+```
+         39 <.
+.------> 38  |
+|            |
+|         .--'
+54       36  --.
+ '-------|---> '-> 44 
+         |
+53 <-----'
+_________________
+
+```
+
 这个repo 目前仅是用于学习的实例代码.
 
 这是一个基于paxos, 只有200行代码的kv存储系统的简单实现, 以最简洁的形式展示paxos如何运行, 作为 [可靠分布式系统-paxos的直观解释][] 这篇教程中的代码示例部分.
