@@ -7,10 +7,11 @@ fns=$(find . -name "*.go" \
 
 echo fns: $fns
 
-fns=./paxoskv/impl.go
+# fns=./paxoskv/impl.go
 
 cat $fns \
     | grep -v "^	*//" \
     | grep -v "^$" \
     | grep -v "pretty\." \
+    | grep -v "dd(" \
     | wc

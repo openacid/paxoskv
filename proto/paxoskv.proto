@@ -1,15 +1,29 @@
 syntax = "proto3";
 
 package paxoskv;
+option go_package = ".;paxoskv";
+
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+
+// option (gogoproto.goproto_unrecognized_all) = false;
+option (gogoproto.equal_all) = true;
+option (gogoproto.compare_all) = true;
+option (gogoproto.goproto_enum_prefix_all) = true;
+// option (gogoproto.goproto_stringer_all) = true;
+option (gogoproto.goproto_getters_all) = false;
+
+enum Op {
+    Noop = 0;
+    Prepare = 1;
+    Accept = 2;
+    Commit = 3;
+}
 
 // PaxosKV defines the paxos RPC and KV API.
 service PaxosKV {
 
     // paxos API: used internally
-
-    rpc Prepare (PrepareReq) returns (PrepareReply) {}
-    rpc Accept (AcceptReq) returns (AcceptReply) {}
-    rpc Commit (CommitReq) returns (CommitReply) {}
+    rpc HandlePaxos (Request) returns (Reply) {}
 
     // KV API
 
@@ -17,46 +31,21 @@ service PaxosKV {
     rpc Get (Cmd) returns (Cmd) {}
 }
 
-// multi-paxos prepare request.
-// It prepares for all paxos instance with log index >= LSN
-message PrepareReq {
+message Request {
+    repeated Op Ops = 1;
+
+    BallotNum Bal = 5;
+    int64 Column = 10;
     // from what paxos instance it runs on
-    int64 FromLSN = 1;
-
-    // Bal is the ballot number of a Proposer
-    BallotNum Bal = 2;
+    map<int64, Instance> Instances = 20;
 }
 
-// PrepareReply is the reply for multi-paxos prepare.
-// It returns a single LastBal since in a multi-paxos, all paxos instances
-// share the same LastBal and acceptor states.
-message PrepareReply {
-    // the last ballot number the instance knows of.
-    BallotNum LastBal = 1;
+message Reply {
+    BallotNum LastBal = 5;
+    // from what paxos instance it runs on
+    map<int64, Instance> Instances = 20;
 
-    repeated Acceptor Acceptors = 2;
 }
-
-message AcceptReq {
-    // Bal is the ballot number of a Proposer
-    BallotNum Bal = 1;
-
-    // Multiple Cmd to accept
-    // The key is LSN.
-    map<int64, Cmd> Cmds = 2;
-}
-
-message AcceptReply {
-    BallotNum LastBal = 1;
-}
-
-message CommitReq {
-    map<int64, Cmd> Cmds = 1;
-}
-
-message CommitReply {
-}
-
 // BallotNum is the ballot number in paxos. It consists of a monotonically
 // incremental number and a universally unique ProposerId.
 message BallotNum {
@@ -70,7 +59,6 @@ message BallotNum {
 message Cmd {
     // LSN: log-sequence-number
     // LSN is used to identify a paxos instance.
-    int64  LSN = 1;
 
     // Author and LSN together identifies a Cmd,
     // since the BallotNum of an established leader is globally unique thus it
@@ -82,21 +70,30 @@ message Cmd {
     // Two proposers may propose a Cmd with the same Key and Vi64, in which case
     // these two must be distinguishable, otherwise a Write operation may be
     // lost.
-    BallotNum Author = 2;
+
+    ValueId ValueId = 5;
 
     string Key = 3;
-
     int64  Vi64 = 4;
 }
 
-// Acceptor is the state of an Acceptor and is the log entry in a multi
+message ValueId {
+    int64 Column = 1;
+    int64 LSN = 5;
+    // The ballot.N of the proposer created this Value
+    int64 ProposerN = 10;
+}
+
+// Instance is the state of an Instance and is the log entry in a multi
 // paxos logs
-message Acceptor {
-    // the value voted by this Acceptor
+message Instance {
+    // the value voted by this Instance
     Cmd Val = 3;
 
-    // at which ballot number the Acceptor voted it.
-    BallotNum VBal = 4;
+    // at which ballot number the Instance voted it.
+    BallotNum VBal = 5;
 
-    bool Committed = 5;
+    repeated int64 Seen = 6;
+
+    bool Committed = 7;
 }

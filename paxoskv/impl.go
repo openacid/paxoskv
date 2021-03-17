@@ -1,580 +1,444 @@
 package paxoskv
 
 import (
-	"errors"
 	"fmt"
+	"log"
+	"math/rand"
 	"net"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
 	"github.com/kr/pretty"
+	"github.com/openacid/paxoskv/goid"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
-	NotEnoughQuorum  = errors.New("not enough Quorum")
+	HigherBalErr    = errors.New("seen a higher ballot")
+	AlreadyPrepared = errors.New("already prepared")
+	NotCommitted    = errors.New("not committed")
+	FakeErr         = errors.New("fake error")
+
 	AcceptorBasePort = int64(3333)
+
+	sendErrorRate = float64(0)
+	recvErrorRate = float64(0)
 )
 
-// RunPaxos execute the paxos phase-1 and phase-2 to establish multi values.
-// The values to establish are log entries of multi paxos.
-// Every log entry is a paxos instance.
-//
-// cmds contains values the caller wants to propose.
-// It returns the established values, which may be not the proposed
-// value.
-//
-// If an entry in cmds is not nil, this func tries to establish it with two phase paxos.
-//
-// If an entry is nil, it act as a reading operation:
-// it reads the state of the paxos instance by running only Phase1.
-func RunPaxos(bal *BallotNum, acceptorIds []int64, fromLSN int64, vals map[int64]*Cmd) map[int64]*Cmd {
+func dd(gg loggerGetter, f string, args ...interface{}) {
+	p := fmt.Sprintf("%s ", goid.ID())
+	gg.getLogger().Output(2, p+pretty.Sprintf(f, args...))
+}
+func bug(gg loggerGetter, f string, args ...interface{}) {
+	p := fmt.Sprintf("%s ", goid.ID())
+	gg.getLogger().Output(2, p+pretty.Sprintf(f, args...))
+	panic("bug")
+}
 
-	maxLSN := int64(-1)
-	for lsn := range vals {
-		if lsn > maxLSN {
-			maxLSN = lsn
-		}
+type NeedCommitError struct {
+	Column int64
+	Err    error
+}
+
+func (e *NeedCommitError) Cause() error {
+	return e.Err
+}
+
+func (e *NeedCommitError) Error() string {
+	return fmt.Sprintf("%s: %d", e.Err.Error(), e.Column)
+}
+
+type loggerGetter interface {
+	getLogger() *log.Logger
+}
+
+type Handler struct {
+	s    *KVServer
+	inst *Instance
+	lg   *log.Logger
+	txid string
+}
+
+func NewHandler(s *KVServer, inst *Instance) *Handler {
+
+	txid := fmt.Sprintf("R%d:tx:?-?-?", s.Id)
+	if inst != nil {
+		txid = fmt.Sprintf("R%d:tx:%s", s.Id, inst.Val.ValueId.str())
 	}
-	quorum := len(acceptorIds)/2 + 1
 
-	for {
-		maxVotedVal, higherBal, err := Phase1(bal, acceptorIds, fromLSN, quorum)
-		if err != nil {
-			pretty.Logf("R%d: P: fail to run phase-1: highest ballot: %s, increment ballot and retry", bal.Id, higherBal.str())
-			bal.N = higherBal.N + 1
+	h := &Handler{
+		s:    s,
+		inst: inst,
+		txid: txid,
+		lg:   log.New(os.Stderr, txid+" ", log.Ltime|log.Lmicroseconds|log.Lshortfile|log.Lmsgprefix),
+	}
+	return h
+}
+
+func (h *Handler) getLogger() *log.Logger {
+	return h.lg
+}
+
+// KVServer provides: a single Proposer with field Bal, multiple Instances with Log.
+type KVServer struct {
+	sync.Mutex
+
+	addr string
+
+	Id      int64
+	cluster []int64
+	other   []int64
+
+	columns  []*columnT
+	applySeq []int64
+	storage  map[string]*Instance
+
+	running chan bool
+	wg      sync.WaitGroup
+	srv     *grpc.Server
+
+	lg *log.Logger
+}
+
+func (s *KVServer) getLogger() *log.Logger {
+	return s.lg
+}
+
+func NewKVServer(id int64) *KVServer {
+	pkv := &KVServer{
+		Id:      id,
+		addr:    fmt.Sprintf(":%d", AcceptorBasePort+int64(id)),
+		cluster: []int64{0, 1, 2},
+		other:   []int64{},
+
+		columns: []*columnT{
+			NewColumn(0),
+			NewColumn(1),
+			NewColumn(2),
+		},
+		storage: map[string]*Instance{},
+
+		running: make(chan bool),
+		srv:     grpc.NewServer(),
+		lg:      log.New(os.Stderr, fmt.Sprintf("R%d: ", id), log.Ltime|log.Lmicroseconds|log.Lshortfile|log.Lmsgprefix),
+	}
+
+	for _, rid := range pkv.cluster {
+		if id == rid {
 			continue
 		}
-		pretty.Logf("R%d: P: %v", bal.Id, maxVotedVal)
+		pkv.other = append(pkv.other, rid)
+	}
 
-		for lsn := range maxVotedVal {
-			if lsn > maxLSN {
-				maxLSN = lsn
+	RegisterPaxosKVServer(pkv.srv, pkv)
+	reflection.Register(pkv.srv)
+
+	return pkv
+}
+
+func (s *KVServer) Start() {
+
+	lis, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		panic(pretty.Sprintf("listen: %s %s", s.addr, err.Error()))
+	}
+
+	dd(s, "serving on %s ...", s.addr)
+	go s.srv.Serve(lis)
+
+	for _, column := range s.other {
+		go s.recoveryLoop(column)
+	}
+}
+
+func (s *KVServer) Stop() {
+	close(s.running)
+	s.srv.GracefulStop()
+	s.wg.Wait()
+}
+
+func (s *KVServer) waitForApplyAll() {
+	for _, column := range s.cluster {
+		dd(s, "start waitForApplyAll: %d", column)
+		for {
+			next, unseen := s.getAppliedState(column)
+			dd(s, "waitForApplyAll: column %d: next,unseen: %d,%d", column, next, unseen)
+			if next == unseen {
+				break
 			}
-		}
-		pretty.Logf("R%d: P: maxLSN: %d", bal.Id, maxLSN)
-
-		// A mutli paxos runs Phase2 for a continuous range of instances.
-		// Holes are filled with NOOP commands.
-		// An instance not voted by a quorum can be used to propose caller's value.
-
-		for lsn := fromLSN; lsn <= maxLSN; lsn++ {
-			if maxVotedVal[lsn] == nil {
-				cmd, found := vals[lsn]
-				if found {
-					if cmd == nil {
-						pretty.Logf("R%d: P: no value to propose in phase-2: lsn: %d cmd: %s", bal.Id, lsn, cmd.str())
-					} else {
-						maxVotedVal[lsn] = cmd
-						pretty.Logf("R%d: P: no voted value seen lsn: %d, propose my value: %s", bal.Id, lsn, cmd.str())
-					}
-				} else {
-					maxVotedVal[lsn] = &Cmd{
-						LSN:    lsn,
-						Author: bal.Clone(),
-						Key:    "NOOP",
-						Vi64:   0,
-					}
-					pretty.Logf("R%d: P: fill hole lsn: %d", bal.Id, lsn)
+			for cc := 0; cc < 3; cc++ {
+				s.Lock()
+				for _, inst := range s.columns[cc].Log {
+					dd(s, "log: %s", inst.str())
 				}
-			} else {
-				pretty.Logf("R%d: P: ChooseOtherValue lsn: %d, %s", bal.Id, lsn, maxVotedVal[lsn].str())
+				s.Unlock()
 			}
+			time.Sleep(time.Millisecond * 500)
 		}
-
-		for lsn, cmd := range maxVotedVal {
-			pretty.Logf("R%d: P: value for Phase2: lsn: %d cmd: %s", bal.Id, lsn, cmd.str())
-		}
-
-		higherBal, err = Phase2(bal, acceptorIds, maxVotedVal, quorum)
-		if err != nil {
-			pretty.Logf("R%d: P: fail to run phase-2: highest ballot: %s, increment ballot and retry", bal.Id, higherBal.str())
-			bal.N = higherBal.N + 1
-			continue
-		}
-
-		for lsn, cmd := range vals {
-			pretty.Logf("R%d: P: values are voted by a Quorum and has been safe: lsn: %d cmd: %s", bal.Id, lsn, cmd.str())
-		}
-
-		return maxVotedVal
+		dd(s, "done waitForApplyAll: %d", column)
 	}
 }
 
-// Phase1 run paxos phase-1 on the instances in range [fromLSN, +oo).
-// If a higher ballot number is seen and phase-1 failed to constitute a Quorum,
-// the highest ballot number that is seen and a NotEnoughQuorum is returned.
-func Phase1(bal *BallotNum, acceptorIds []int64, fromLSN int64, quorum int) (map[int64]*Cmd, *BallotNum, error) {
+func (h *Handler) sendCommit(column int64, instances map[int64]*Instance) {
+	s := h.s
 
-	req := &PrepareReq{
-		FromLSN: fromLSN,
-		Bal:     bal.Clone(),
+	req := &Request{
+		Ops:       []Op{Op_Commit},
+		Column:    column,
+		Instances: instances,
 	}
-
-	higherBal := *bal
-
-	replies := make([]*PrepareReply, 0)
-	for _, aid := range acceptorIds {
-		reply := new(PrepareReply)
-		err := rpcTo(bal.Id, aid, "Prepare", req, reply)
-		if err != nil {
-			continue
-		}
-
-		if bal.Cmp(reply.LastBal) < 0 {
-			higherBal = *reply.LastBal
-			continue
-		}
-
-		replies = append(replies, reply)
-	}
-
-	if len(replies) < quorum {
-		return nil, &higherBal, NotEnoughQuorum
-	}
-
-	// find the voted value with highest vbal
-	maxVoted := make(map[int64]*Acceptor)
-	for _, r := range replies {
-		for _, acc := range r.Acceptors {
-			lsn := acc.Val.LSN
-			cur := maxVoted[lsn]
-			if cur == nil || acc.VBal.Cmp(cur.VBal) >= 0 {
-				maxVoted[lsn] = acc
+	for _, to := range s.other {
+		go func(to int64) {
+			for i := 0; i < 3; i++ {
+				err := h.rpcTo(to, "HandlePaxos", req, &Reply{})
+				if err == nil {
+					dd(h, "P: Commit done to %d column:%d %s", to, column, instsStr(instances))
+					return
+				}
+				dd(h, "P: Commit err: %s, column:%d %s", err.Error(), column, instsStr(instances))
+				time.Sleep(time.Millisecond * 10)
 			}
-		}
+			dd(h, "P: Commit fail to %d column:%d %s", to, column, instsStr(instances))
+		}(to)
 	}
-
-	pretty.Logf("R%d: P: Phase1: maxVoted: %#v", bal.Id, maxVoted)
-
-	m := make(map[int64]*Cmd)
-	for lsn, acc := range maxVoted {
-		m[lsn] = acc.Val
-	}
-	return m, nil, nil
+	dd(h, "Commit sent: column:%d %s", column, instsStr(instances))
 }
 
-// Phase2 run paxos phase-2 on multiple instances.
-// If a higher ballot number is seen and phase-2 failed to constitute a Quorum,
-// the highest ballot number and a NotEnoughQuorum is returned.
-func Phase2(bal *BallotNum, acceptorIds []int64, vals map[int64]*Cmd, quorum int) (*BallotNum, error) {
+func (s *KVServer) getLogLens() []int64 {
+	return []int64{
+		int64(len(s.columns[0].Log)),
+		int64(len(s.columns[1].Log)),
+		int64(len(s.columns[2].Log)),
+	}
+}
 
-	req := &AcceptReq{
-		Bal:  bal.Clone(),
-		Cmds: vals,
+// allocNewInst allocates a log-sequence-number in local cmds.
+func (s *KVServer) allocNewInst(column int64, cmd *Cmd) *Instance {
+	col := s.columns[column]
+
+	lsn := int64(len(col.Log))
+
+	// VBal nil: a FastAccept state
+	inst := &Instance{
+		Val:  cmd,
+		VBal: nil,
+	}
+	col.Log = append(col.Log, inst)
+
+	inst.Seen = s.getLogLens()
+
+	cmd.ValueId = &ValueId{
+		Column:    column,
+		LSN:       lsn,
+		ProposerN: s.Id,
 	}
 
-	higherBal := *bal
+	dd(s, "allocated: %s", inst.str())
+	return inst.Clone()
+}
 
-	ok := 0
-	for _, aid := range acceptorIds {
-		reply := new(AcceptReply)
-		err := rpcTo(bal.Id, aid, "Accept", req, reply)
-		if err != nil {
-			continue
-		}
+func (h *Handler) setLog(inst *Instance) {
+	s := h.s
+	column, lsn := inst.getColLSN()
+	col := s.columns[column]
 
-		pretty.Logf("R%d: P: hdl Accept reply: %s", bal.Id, reply)
-		if bal.Cmp(reply.LastBal) < 0 {
-			higherBal = *reply.LastBal
-			continue
-		}
-
-		ok++
-		if ok == quorum {
-			return nil, nil
-		}
+	for int(lsn) >= len(col.Log) {
+		col.Log = append(col.Log, nil)
 	}
 
-	return &higherBal, NotEnoughQuorum
+	// TODO bad.
+	cc := col.Log[lsn]
+	if cc != nil && cc.Committed {
+		if !cc.Val.Equal(inst.Val) || !seenEq(cc.Seen, inst.Seen) {
+			bug(h, "accept to a committed but different: %s %s", cc.str(), inst.str())
+		}
+	}
+	col.Log[lsn] = inst.Clone()
+	dd(h, "setLog: column:%d, inst:%s", column, inst.str())
+}
+
+func (h *Handler) localPrepare(column, lsn int64) (*BallotNum, *Instance) {
+
+	s := h.s
+
+	col := s.columns[column]
+
+	s.Lock()
+	defer s.Unlock()
+
+	if col.Bal == nil {
+		dd(h, "localPrepare: column: %d, incr lastBal: %s", column, col.LastBal.str())
+
+		// next ballot and prepare myself
+		col.LastBal.N++
+		col.LastBal.Id = s.Id
+		col.Bal = col.LastBal.Clone()
+	} else {
+		dd(h, "localPrepare: column: %d, use current bal: %s", column, col.Bal.str())
+	}
+
+	// NOTE: after prepare, it must re-fetch the local latest value.
+	return col.Bal.Clone(), col.Log[lsn].Clone()
+}
+
+func (h *Handler) runPaxosLoop(column, lsn int64, dsts []int64) *Instance {
+	// this is the only goroutine to have a bal.
+	// No two proposer is allowed to have the same bal
+	for i := 0; ; i++ {
+		bal, inst := h.localPrepare(column, lsn)
+		dst := dsts[i%len(dsts)]
+		committed, err := h.runPaxos(bal, column, dst, inst)
+		if err == nil {
+			return committed
+		}
+	}
+}
+
+func (h *Handler) runPaxos(bal *BallotNum, column, to int64, inst *Instance) (*Instance, error) {
+
+	s := h.s
+	dd(h, "runPaxos: %s", inst.str())
+
+	col := s.columns[column]
+	lsn := inst.getLSN()
+	req := &Request{
+		Ops:       []Op{Op_Prepare, Op_Accept},
+		Bal:       bal.Clone(),
+		Column:    column,
+		Instances: map[int64]*Instance{lsn: inst},
+	}
+
+	reply := new(Reply)
+	err := h.rpcTo(to, "HandlePaxos", req, reply)
+	if err != nil {
+		s.setNeedElect(column, bal)
+		return nil, HigherBalErr
+	}
+
+	if bal.Less(reply.LastBal) {
+		dd(h, "bal < reply.LastBal: %s < %s", bal.str(), reply.LastBal.str())
+		s.setNeedElect(column, reply.LastBal)
+		return nil, HigherBalErr
+	}
+
+	remote := reply.Instances[lsn]
+
+	s.Lock()
+	defer s.Unlock()
+
+	if bal.Less(col.LastBal) {
+		dd(h, "bal < col.LastBal: %s < %s", bal.str(), col.LastBal.str())
+		return nil, HigherBalErr
+	}
+
+	local := col.Log[lsn]
+	if local.VBal.Compare(remote.VBal) < 0 {
+		h.setLog(remote)
+	} else {
+		// local >= remote
+
+		// replied instance.Vbal is the req.Bal;
+		// thus there is no chance local >= remote.
+		bug(h, "impossible: local >= remote: %s %s", local.str(), remote.str())
+	}
+
+	local = col.Log[lsn]
+	h.hdlCommitInstance(local)
+	h.sendCommit(column,
+		map[int64]*Instance{
+			local.getLSN(): local,
+		})
+
+	return local, nil
+}
+
+func (s *KVServer) setNeedElect(column int64, bal *BallotNum) {
+	col := s.columns[column]
+	s.Lock()
+	defer s.Unlock()
+
+	col.Bal = nil
+
+	if col.LastBal.Less(bal) {
+		col.LastBal = bal.Clone()
+	}
+}
+
+// ServeAcceptors starts a grpc server for every acceptor.
+func ServeAcceptors(ids []int64) []*KVServer {
+
+	var servers []*KVServer
+
+	for _, aid := range ids {
+
+		pkv := NewKVServer(aid)
+		servers = append(servers, pkv)
+		pkv.Start()
+	}
+
+	return servers
 }
 
 // rpcTo send grpc request to all acceptors
-func rpcTo(id int64, acceptorId int64, method string, req, reply proto.Message) error {
+func (h *Handler) rpcTo(to int64, method string, req, reply proto.Message) error {
 
 	// With heavy competition an operation takes longer time to finish.
 	// There is still chance no leader is established before timeout.
 
+	dd(h, "P: send %s-req to R%d %s", method, to, req.(strer).str())
+
+	if rand.Float64() < sendErrorRate {
+		dd(h, "fake sendError to R%d, req: %s", to, req.(strer).str())
+		return FakeErr
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
-	address := fmt.Sprintf("127.0.0.1:%d", AcceptorBasePort+int64(acceptorId))
+	address := fmt.Sprintf("127.0.0.1:%d", AcceptorBasePort+int64(to))
 	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
-		pretty.Logf("did not connect: %s", err.Error())
+		dd(h, "did not connect: %s", err.Error())
 		return err
 	}
 	defer conn.Close()
 
-	pretty.Logf("R%d: P: send %s-req to: R%d: %s", id, method, acceptorId, req.(strer).str())
-
+	fakeRecvErr := rand.Float64() < recvErrorRate
+	if fakeRecvErr {
+		// do not let caller to receive the reply
+		reply = proto.Clone(reply)
+	}
 	err = conn.Invoke(ctx, "/paxoskv.PaxosKV/"+method, req, reply)
 	if err != nil {
-		pretty.Logf("R%d: P: recv %s-reply from: R%d: err: %s", id, method, acceptorId, err)
+		dd(h, "P: recv %s-reply from R%d err: %s", method, to, err)
 	} else {
-		pretty.Logf("R%d: P: recv %s-reply from: R%d: %s", id, method, acceptorId, reply.(strer).str())
+		dd(h, "P: recv %s-reply from R%d %s", method, to, reply.(strer).str())
+	}
+
+	if fakeRecvErr {
+		dd(h, "fake recvError from R%d, req: %s", to, req.(strer).str())
+		return FakeErr
 	}
 	return err
 }
 
-// KVServer provides: a single Proposer with field Bal, multiple Acceptors with Log.
-type KVServer struct {
-	sync.Mutex
+func rpcTo2(to int64, method string, req, reply proto.Message) error {
 
-	Id          int64
-	AcceptorIds []int64
-	Quorum      int
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+	defer cancel()
 
-	// Proposer ballot
-	Bal     *BallotNum
-	LastBal *BallotNum
-	// A semaphore for election.
-	// A multi-paxos impl only need one proposer.
-	electSem chan int
-
-	Log     []*Acceptor
-	Storage map[string]*Acceptor
-
-	// The first log that is not committed
-	nonCommitted int64
-
-	srv *grpc.Server
-}
-
-func NewKVServer(acceptorIds []int64, id int64) *KVServer {
-	pkv := &KVServer{
-		Id:          id,
-		LastBal:     &BallotNum{N: 0, Id: id},
-		AcceptorIds: append([]int64{}, acceptorIds...),
-		Quorum:      len(acceptorIds)/2 + 1,
-
-		Storage: map[string]*Acceptor{},
-
-		electSem: make(chan int, 1),
-	}
-
-	pkv.electSem <- 1
-	return pkv
-}
-
-func (s *KVServer) getAcceptor(lsn int64) *Acceptor {
-
-	for int(lsn) >= len(s.Log) {
-		s.Log = append(s.Log, nil)
-	}
-
-	if s.Log[lsn] == nil {
-		return &Acceptor{VBal: &BallotNum{}}
-	}
-	return s.Log[lsn]
-}
-
-// Prepare handles Prepare request.
-// Handling Prepare needs only the `Bal` field.
-// The reply contains all Acceptor the proposer wants to establish a value on.
-func (s *KVServer) Prepare(c context.Context, req *PrepareReq) (*PrepareReply, error) {
-
-	pretty.Logf("R%d: A: recv Prepare-req: %s", s.Id, req.str())
-
-	s.Lock()
-	defer s.Unlock()
-
-	reply := &PrepareReply{
-		LastBal:   s.LastBal.Clone(),
-		Acceptors: make([]*Acceptor, 0),
-	}
-
-	if req.Bal.Cmp(s.LastBal) >= 0 {
-		*s.LastBal = *req.Bal
-		for i := req.FromLSN; i < int64(len(s.Log)); i++ {
-			if s.Log[i] != nil {
-				reply.Acceptors = append(reply.Acceptors, s.Log[i].Clone())
-			}
-		}
-	}
-
-	pretty.Logf("R%d: A: send Prepare-reply: %s", s.Id, reply.str())
-
-	return reply, nil
-}
-
-// Accept handles Accept request.
-func (s *KVServer) Accept(c context.Context, req *AcceptReq) (*AcceptReply, error) {
-
-	pretty.Logf("R%d: A: recv Accept-req: %s", s.Id, req.str())
-
-	s.Lock()
-	defer s.Unlock()
-
-	reply := &AcceptReply{
-		LastBal: s.LastBal.Clone(),
-	}
-
-	accepted := req.Bal.Cmp(s.LastBal) >= 0
-
-	if accepted {
-		for lsn, cmd := range req.Cmds {
-			acc := s.getAcceptor(lsn)
-			acc.Val = cmd
-			acc.VBal = req.Bal
-
-			s.Log[lsn] = acc
-		}
-
-		// This is a common optimization of paxos:
-		// In the original impl an Accept-req can only be sent to prepared acceptors.
-		// It could be sent to a non-prepared acceptor, if the LastBal on the acceptor <= req.Bal.
-		// But it requires to update the LastBal, just like it has granted a Prepare-req from the proposer.
-		//
-		// See detailed discussion:  https://stackoverflow.com/questions/29880949/contradiction-in-lamports-paxos-made-simple-paper
-		s.LastBal = req.Bal
-	}
-
-	pretty.Logf("R%d: A: accepted: %t", s.Id, accepted)
-
-	return reply, nil
-}
-
-// Commit handles Commit request.
-// It is possible an acceptor votes a new value for a committed instance,
-// e.g. update the VBal to a newer value after it is committed.
-// This results in inconsistent Log[i].VBal but the Log[i].Val itself is consistent on all servers.
-func (s *KVServer) Commit(c context.Context, req *CommitReq) (*CommitReply, error) {
-
-	pretty.Logf("R%d: A: hdl Commit-req: %s", s.Id, req.str())
-
-	s.Lock()
-	defer s.Unlock()
-
-	for lsn, cmd := range req.Cmds {
-		acc := s.getAcceptor(lsn)
-
-		acc.Val = cmd
-		acc.Committed = true
-
-		s.Log[lsn] = acc
-
-		for int(s.nonCommitted) < len(s.Log) &&
-			s.Log[s.nonCommitted] != nil &&
-			s.Log[s.nonCommitted].Committed {
-			s.nonCommitted++
-		}
-
-		s.apply(lsn)
-	}
-
-	return &CommitReply{}, nil
-}
-
-func (s *KVServer) apply(lsn int64) {
-
-	acc := s.Log[lsn]
-
-	pretty.Logf("R%d: A: apply: lsn=%d: %s", s.Id, lsn, acc.str())
-
-	cur := s.Storage[acc.Val.Key]
-	if cur != nil && cur.Val.LSN >= lsn {
-		pretty.Logf("R%d: A: AlreadyApplied: lsn=%d: overridden by:%d", s.Id, lsn, cur.Val.LSN)
-		return
-	}
-	s.Storage[acc.Val.Key] = acc
-}
-
-// Set impl the KV API and handles a Set request from client.
-// Only the Key and Vi64 should be set in req.
-func (s *KVServer) Set(c context.Context, req *Cmd) (*Cmd, error) {
-
-	pretty.Logf("R%d: P: hdl Set", s.Id)
-
-	// This demo is an aggressive impl of multipaxos:
-	// Unlike raft a follower forwards a write-op to the leader,
-	// in this demo it just seize the leadership.
-	//
-	// This is not a practical strategy but only meant to introduce more competition thus to expose problems quickly.
-	// It repeats electing itself as leader until timed out.
-	for {
-		select {
-		case <-c.Done():
-			return nil, c.Err()
-		default:
-		}
-		chosen := s.set(c, req)
-		if chosen != nil {
-			return chosen, nil
-		}
-	}
-}
-
-func (s *KVServer) set(c context.Context, cmd *Cmd) *Cmd {
-
-	pretty.Logf("R%d: hdl set", s.Id)
-
-	// electMe has 3 steps:
-	// - Run Phase1 to establish leadership
-	// - Re-run Phase2 for all seen logs(paxos instances) that are not committed.
-	// - Commit them.
-	// Then new instance is allowed to propose.
-	// This is a simplified strategy. With a practical multi-paxos impl, proposing new instances and rebuilding logs are safe to run concurrently.
-
-	bal := s.electMe()
-
-	// After leadership established, all safe instances are rebuilt on this
-	// proposer.
-
-	// The election process may repeat several times before a leader is established.
-	// Since election itself rebuild logs(paxos instances),
-	// a previously proposed(but not finished) instance may have been committed by other leader.
-	// Thus we'd find it in local logs first before allocating a new log entry.
-	if cmd.Author != nil {
-		lsn := cmd.LSN
-		s.Lock()
-		if int(lsn) < len(s.Log) && proto.Equal(cmd, s.Log[lsn].Val) {
-			pretty.Logf("R%d: P: cmd is already committed when set: %s", s.Id, s.Log[lsn].str())
-			s.Unlock()
-			return cmd
-		}
-		s.Unlock()
-	}
-
-	// cmd is not in local log, or it is overridden by other cmd.
-	// Try to re-propose it in a new log entry.
-
-	lsn := s.allocLSN()
-
-	cmd.LSN = lsn
-	cmd.Author = bal.Clone()
-
-	// A multi-paxos only need to run Phase2 for a proposal.
-	// Phase1 is required only when Phase2 fails.
-
-	higherBal, err := Phase2(bal, s.AcceptorIds, map[int64]*Cmd{lsn: cmd}, s.Quorum)
+	address := fmt.Sprintf("127.0.0.1:%d", AcceptorBasePort+int64(to))
+	conn, err := grpc.Dial(address, grpc.WithInsecure())
 	if err != nil {
-		pretty.Logf("R%d: P: fail to run phase-2: highest ballot: %s, increment ballot and retry", bal.Id, higherBal.str())
-
-		// Leadership is taken by another server,
-		// clear local proposer.
-		s.Lock()
-		if higherBal.Cmp(s.LastBal) > 0 {
-			s.LastBal = higherBal.Clone()
-		}
-		if s.Bal != nil && s.Bal.Cmp(bal) == 0 {
-			s.Bal = nil
-		}
-		s.Unlock()
-		return nil
+		return err
 	}
+	defer conn.Close()
 
-	pretty.Logf("R%d: P: value is voted by a Quorum and has been safe: %s", bal.Id, cmd.str())
-
-	creq := &CommitReq{Cmds: map[int64]*Cmd{lsn: cmd.Clone()}}
-	for _, aid := range s.AcceptorIds {
-		_ = rpcTo(s.Id, aid, "Commit", creq, &CommitReply{})
-	}
-	pretty.Logf("R%d: P: Commit done: %s", bal.Id, cmd.str())
-	return cmd
-}
-
-// allocLSN allocates a log-sequence-number in local logs.
-func (s *KVServer) allocLSN() int64 {
-	s.Lock()
-	defer s.Unlock()
-	s.Log = append(s.Log, nil)
-	lsn := int64(len(s.Log)) - 1
-	pretty.Logf("R%d: P: alloc: %d", s.Id, lsn)
-	return lsn
-}
-
-// electMe run paxos Phase1 to become leader, and re-run Phase2 and Commit for uncommitted instances.
-func (s *KVServer) electMe() *BallotNum {
-
-	<-s.electSem
-	defer func() { s.electSem <- 1 }()
-
-	s.Lock()
-	bal := s.Bal
-	nonCommitted := s.nonCommitted
-	lastN := s.LastBal.N
-	s.Unlock()
-
-	if bal != nil {
-		return bal
-	}
-
-	// run paxos to establish leadership and commit uncommitted logs
-
-	bal = &BallotNum{N: lastN + 1, Id: s.Id}
-
-	pretty.Logf("R%d: P: electMe: %s", s.Id, bal.str())
-
-	voted := RunPaxos(bal, s.AcceptorIds, nonCommitted, map[int64]*Cmd{})
-
-	creq := &CommitReq{Cmds: voted}
-	for _, aid := range s.AcceptorIds {
-		_ = rpcTo(s.Id, aid, "Commit", creq, &CommitReply{})
-	}
-
-	s.Lock()
-	defer s.Unlock()
-
-	s.Bal = bal
-
-	if bal.Cmp(s.LastBal) > 0 {
-		s.LastBal = bal.Clone()
-	}
-
-	// clean up logs thus no annoying holes in log:
-	for len(s.Log) > 0 && s.Log[len(s.Log)-1] == nil {
-		pretty.Logf("R%d: clean nil log: %d", s.Id, len(s.Log)-1)
-		s.Log = s.Log[:len(s.Log)-1]
-	}
-
-	for lsn, l := range s.Log {
-		pretty.Logf("R%d: repaired log: %d %s", s.Id, lsn, l.str())
-	}
-	return bal
-}
-
-// Get impl the KV-API get method.
-// Only req.Key should be specified.
-func (s *KVServer) Get(c context.Context, req *Cmd) (*Cmd, error) {
-	s.Lock()
-	defer s.Unlock()
-
-	a, found := s.Storage[req.Key]
-	pretty.Logf("R%d: G: v: %s", s.Id, a.str())
-	if found {
-		v := proto.Clone(a.Val).(*Cmd)
-		return v, nil
-	}
-	return nil, nil
-}
-
-// ServeAcceptors starts a grpc server for every acceptor.
-func ServeAcceptors(acceptorIds []int64) []*KVServer {
-
-	var servers []*KVServer
-
-	for _, aid := range acceptorIds {
-		addr := fmt.Sprintf(":%d", AcceptorBasePort+int64(aid))
-
-		lis, err := net.Listen("tcp", addr)
-		if err != nil {
-			panic(pretty.Sprintf("listen: %s %s", addr, err.Error()))
-		}
-
-		s := grpc.NewServer()
-		pkv := NewKVServer(acceptorIds, aid)
-		pkv.srv = s
-
-		RegisterPaxosKVServer(s, pkv)
-		reflection.Register(s)
-		pretty.Logf("R%d: serving on %s ...", aid, addr)
-		servers = append(servers, pkv)
-		go s.Serve(lis)
-	}
-
-	return servers
+	err = conn.Invoke(ctx, "/paxoskv.PaxosKV/"+method, req, reply)
+	return err
 }
