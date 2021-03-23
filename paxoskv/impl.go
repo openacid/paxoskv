@@ -98,7 +98,9 @@ func (p *Proposer) Phase1(acceptorIds []int64, quorum int) (*Value, *BallotNum, 
 
 		pretty.Logf("Proposer: handling Prepare reply: %s", r)
 		if !p.Bal.GE(r.LastBal) {
-			higherBal = *r.LastBal
+			if r.LastBal.GE(&higherBal) {
+				higherBal = *r.LastBal
+			}
 			continue
 		}
 
@@ -129,7 +131,9 @@ func (p *Proposer) Phase2(acceptorIds []int64, quorum int) (*BallotNum, error) {
 	for _, r := range replies {
 		pretty.Logf("Proposer: handling Accept reply: %s", r)
 		if !p.Bal.GE(r.LastBal) {
-			higherBal = *r.LastBal
+			if r.LastBal.GE(&higherBal) {
+				higherBal = *r.LastBal
+			}
 			continue
 		}
 		ok += 1
