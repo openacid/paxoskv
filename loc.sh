@@ -1,17 +1,16 @@
 #!/bin/sh
 
-
-fns=$(find . -name "*.go" \
-    | grep -v "\.pb\.go" \
-    | grep -v "_test.go")
+fns=$(find . -name "*.go" |
+  grep -v "\.pb\.go" |
+  grep -v "_test.go")
 
 echo fns: "$fns"
 
 # fns=./paxoskv/impl.go
 
-cat "$fns" \
-    | grep -v "^	*//" \
-    | grep -v "^$" \
-    | grep -v "pretty\." \
-    | grep -v "dd(" \
-    | wc
+cat "$fns" |
+  grep -v "^	*//" |
+  grep -v "^$" |
+  grep -v "pretty\." |
+  grep -v "dd(" |
+  wc
