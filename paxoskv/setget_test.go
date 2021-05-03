@@ -3,6 +3,7 @@ package paxoskv
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"testing"
 
@@ -47,7 +48,8 @@ func Test_set_get(t *testing.T) {
 	}
 
 	nworker := 5
-	nreq := 200
+	// nreq := 200
+	nreq := 20
 
 	var wg sync.WaitGroup
 	ch := make(chan *Cmd, 1000)
@@ -241,5 +243,17 @@ func Test_set_get(t *testing.T) {
 			}
 		}
 
+	}
+
+	{
+		fmt.Println("output graphviz")
+		g := s.graphviz()
+		// fmt.Println(g)
+		pwd := os.Getenv("PWD")
+		fmt.Println("pwd:", pwd)
+		err := WriteFile(pwd+"/logs.dot", []byte(g), 0644)
+		if err != nil {
+			panic(err.Error())
+		}
 	}
 }
