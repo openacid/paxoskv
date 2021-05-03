@@ -6,8 +6,8 @@
 # go get github.com/gogo/protobuf/protoc-gen-gogoslick
 
 protoc -I=. \
-    -I=$GOPATH/src \
-    -I=$GOPATH/src/github.com/gogo/protobuf/protobuf \
+    -I="$GOPATH"/src \
+    -I="$GOPATH"/src/github.com/gogo/protobuf/protobuf \
     --proto_path=proto \
     --gogofaster_out=plugins=grpc:paxoskv \
     paxoskv.proto

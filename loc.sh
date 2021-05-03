@@ -5,13 +5,13 @@ fns=$(find . -name "*.go" \
     | grep -v "\.pb\.go" \
     | grep -v "_test.go")
 
-echo fns: $fns
+echo fns: "$fns"
 
 # fns=./paxoskv/impl.go
 
-for fn in $fns;do
-    echo $fn
-    cat $fn \
+for fn in "$fns";do
+    echo "$fn"
+    cat "$fn" \
         | grep -v "^	*//" \
         | grep -v "^$" \
         | grep -v "pretty\." \
@@ -19,7 +19,7 @@ for fn in $fns;do
         | wc
 done
 
-cat $fns \
+cat "$fns" \
     | grep -v "^	*//" \
     | grep -v "^$" \
     | grep -v "pretty\." \
