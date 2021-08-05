@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	NotEnoughQuorum  = errors.New("not enough qourum")
+	NotEnoughQuorum  = errors.New("not enough quorum")
 	AcceptorBasePort = int64(3333)
 )
 
@@ -160,11 +160,9 @@ func (p *Proposer) rpcToAll(acceptorIds []int64, action string) []*Acceptor {
 			log.Fatalf("did not connect: %v", err)
 		}
 
-		defer conn.Close()
 		c := NewPaxosKVClient(conn)
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
 
 		var reply *Acceptor
 		if action == "Prepare" {
@@ -177,7 +175,13 @@ func (p *Proposer) rpcToAll(acceptorIds []int64, action string) []*Acceptor {
 		}
 		log.Printf("Proposer: recv %s reply from: Acceptor-%d: %v", action, aid, reply)
 
-		replies = append(replies, reply)
+		// hear may be nil if rpc inner err
+		if reply != nil {
+			replies = append(replies, reply)
+		}
+
+		conn.Close()
+		cancel()
 	}
 	return replies
 }
@@ -265,6 +269,8 @@ func (s *KVServer) Accept(c context.Context, r *Proposer) (*Acceptor, error) {
 		LastBal: &d,
 	}
 
+	// article say acceptor's LastBal equal proposer's Bal will accept it
+	// but if greater, point that a large proposer's Bal has been through phrase1 with most acceptor, the same accept it
 	if r.Bal.GE(v.acceptor.LastBal) {
 		v.acceptor.LastBal = r.Bal
 		v.acceptor.Val = r.Val
