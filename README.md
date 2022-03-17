@@ -35,30 +35,31 @@ voted value == accepted value // by an acceptor
 ```
 
 # Usage
-
-跑测试: `GO111MODULE=on go test ./...`.
-
-重新build proto文件(如果宁想要修改下玩玩的话): `make gen`.
-
-数据结构使用protobuf 定义; RPC使用grpc实现;
+paxoskv.proto修改后更新
+```
+protoc --go_out=. --go_opt=paths=source_relative     --go-grpc_out=. --go-grpc_opt=paths=source_relative paxoskv.proto
+```
+测试
+```
+cd example/test
+go test
+```
 
 
 # 目录结构
 
-- `proto/paxoskv.proto`: 定义paxos相关的数据结构.
+- `paxoskv.proto`: 定义paxos相关的数据结构.
 
-- `paxoskv/`:
+- `impl.go`: 206行代码实现的paxos协议:
+	- 实现paxos Acceptor的`Prepare()`和`Accept()`这两个request handler;
+	- 实现Proposer的功能: 执行`Phase1()`和`Phase2()`,
+	- 以及完整运行一次paxos的`RunPaxos()`方法;
+	- 实现一个kv纯内存的存储, 每个key有多个version, 每个version对应一个paxos instance;
+	- 以及启动n个Acceptor的grpc服务函数
 
-    - `impl.go`: 206行代码实现的paxos协议:
-        - 实现paxos Acceptor的`Prepare()`和`Accept()`这两个request handler;
-        - 实现Proposer的功能: 执行`Phase1()`和`Phase2()`,
-        - 以及完整运行一次paxos的`RunPaxos()`方法;
-        - 实现一个kv纯内存的存储, 每个key有多个version, 每个version对应一个paxos instance;
-        - 以及启动n个Acceptor的grpc服务函数
+- `example/test/paxos_slides_case_test.go`: 按照 [可靠分布式系统-paxos的直观解释][] 给出的两个例子([slide-32][]和[slide-33][]), 调用paxos接口来模拟这2个场景中的paxos运行.
 
-    - `paxos_slides_case_test.go`: 按照 [可靠分布式系统-paxos的直观解释][] 给出的两个例子([slide-32][]和[slide-33][]), 调用paxos接口来模拟这2个场景中的paxos运行.
-
-    - `example_set_get_test.go`: 使用paxos提供的接口实现指定key和ver的写入和读取.
+- `example/test/example_set_get_test.go`: 使用paxos提供的接口实现指定key和ver的写入和读取.
 
 # Question
 
