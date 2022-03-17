@@ -42,6 +42,8 @@ voted value == accepted value // by an acceptor
 
 数据结构使用protobuf 定义; RPC使用grpc实现;
 
+如想了解最新的go grpc的环境部署,请看[go-grpc文档](https://grpc.io/docs/languages/go/quickstart/)
+
 
 # 目录结构
 
