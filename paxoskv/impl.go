@@ -195,6 +195,7 @@ type Versions map[int64]*Version
 
 // KVServer impl the paxos Acceptor API: handing Prepare and Accept request.
 type KVServer struct {
+	UnimplementedPaxosKVServer
 	mu      sync.Mutex
 	Storage map[string]Versions
 }
