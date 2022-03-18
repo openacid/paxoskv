@@ -36,7 +36,9 @@ voted value == accepted value // by an acceptor
 
 # Usage
 
-跑测试: `GO111MODULE=on go test ./...`.
+Requirements: `go >= 1.14`.
+
+跑测试: `go test ./...`.
 
 重新build proto文件(如果宁想要修改下玩玩的话): `make gen`.
 
