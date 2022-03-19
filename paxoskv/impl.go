@@ -177,7 +177,10 @@ func (p *Proposer) rpcToAll(acceptorIds []int64, action string) []*Acceptor {
 		}
 		log.Printf("Proposer: recv %s reply from: Acceptor-%d: %v", action, aid, reply)
 
-		replies = append(replies, reply)
+		// hear may be nil if rpc inner err
+		if reply != nil {
+			replies = append(replies, reply)
+		}
 	}
 	return replies
 }
