@@ -5,7 +5,8 @@
 
 这个repo 目前仅是用于学习的实例代码.
 
-这是一个基于paxos, 只有200行代码的kv存储系统的简单实现, 以最简洁的形式展示paxos如何运行, 作为 [可靠分布式系统-paxos的直观解释][] 这篇教程中的代码示例部分.
+这是一个基于paxos, 只有200行代码的kv存储系统的简单实现, 以最简洁的形式展示paxos如何运行, 作为 [可靠分布式系统-paxos的直观解释][] 这篇教程中的示例.
+[200行代码实现基于paxos的kv存储][] 是对本代码讲解的教程.
 
 因为有不少网友跟我问起这篇教程中的实现问题, 例如怎么把只能确定一个值的paxos应用到实际场景中.
 既然**Talk is cheap**, 那么就**Show me the code**, 把教程中描述的内容直接用代码实现出来, 希望能覆盖到教程中的每个细节. 帮助大家理解paxos的运行机制.
@@ -71,5 +72,6 @@ Requirements: `go >= 1.14`.
 
 [issue]:                          https://github.com/openacid/paxoskv/issues/new/choose
 [可靠分布式系统-paxos的直观解释]: https://blog.openacid.com/algo/paxos/
+[200行代码实现基于paxos的kv存储]: https://blog.openacid.com/algo/paxoskv/
 [slide-32]:                       https://blog.openacid.com/algo/paxos/#slide-32
 [slide-33]:                       https://blog.openacid.com/algo/paxos/#slide-33
