@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	NotEnoughQuorum  = errors.New("not enough qourum")
+	NotEnoughQuorum  = errors.New("not enough quorum")
 	AcceptorBasePort = int64(3333)
 )
 
@@ -266,6 +266,8 @@ func (s *KVServer) Accept(c context.Context, r *Proposer) (*Acceptor, error) {
 		LastBal: &d,
 	}
 
+	// article say acceptor's LastBal equal proposer's Bal will accept it
+	// but if greater, point that a large proposer's Bal has been through phrase1 with most acceptor, the same accept it
 	if r.Bal.GE(v.acceptor.LastBal) {
 		v.acceptor.LastBal = r.Bal
 		v.acceptor.Val = r.Val
