@@ -39,10 +39,10 @@ func (a *BallotNum) GE(b *BallotNum) bool {
 // The record key and the version is specified by p.PaxosInstanceId, since every
 // update of a record(every version) is impl by a paxos instance.
 //
-// If `val` is nil, it act as a reading operation:
-// it reads the sepcified version of a record by running a paxos without propose
+// If `val` is nil, it acts as a reading operation:
+// it reads the specified version of a record by running a paxos without propose
 // any value: This func will finish paxos phase-2 to make it safe if a voted
-// value found, otherwise, it just return nil without running phase-2.
+// value is found, otherwise, it just returns nil without running phase-2.
 func (p *Proposer) RunPaxos(acceptorIds []int64, val *Value) *Value {
 
 	quorum := len(acceptorIds)/2 + 1
