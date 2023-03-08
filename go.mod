@@ -3,7 +3,7 @@ module github.com/openacid/paxoskv
 go 1.17
 
 require (
-	github.com/golang/protobuf v1.5.2
+	github.com/golang/protobuf v1.5.3
 	github.com/kr/pretty v0.3.1
 	github.com/stretchr/testify v1.8.1
 	golang.org/x/net v0.0.0-20201031054903-ff519b6c9102
